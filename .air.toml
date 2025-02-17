@@ -1,0 +1,26 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+cmd = "CGO_ENABLED=1 GOOS=linux GOGC=20 go build -o ./tmp/main ."
+bin = "./tmp/main"
+delay = 1000
+exclude_dir = ["tmp", "vendor"]
+include_ext = ["go", "yaml", "yml"]
+kill_delay = "0s"
+log = "build-errors.log"
+send_interrupt = false
+stop_on_error = true
+
+[color]
+app = ""
+build = "yellow"
+main = "magenta"
+runner = "green"
+watcher = "cyan"
+
+[log]
+time = false
+
+[misc]
+clean_on_exit = false

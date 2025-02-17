@@ -1,0 +1,19 @@
+FROM golang:1.23.4-alpine
+
+WORKDIR /app
+
+# Install necessary build tools
+RUN apk add --no-cache git make gcc musl-dev
+
+# Install air for hot reloading
+RUN go install github.com/air-verse/air@latest
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Run with air for development
+CMD ["air"]

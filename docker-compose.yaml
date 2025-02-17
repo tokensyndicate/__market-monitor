@@ -1,0 +1,45 @@
+version: "3.8"
+
+services:
+  influxdb:
+    image: influxdb:2.7
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=password123
+      - DOCKER_INFLUXDB_INIT_ORG=myorg
+      - DOCKER_INFLUXDB_INIT_BUCKET=trading
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-token
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  market-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    environment:
+      - EXCHANGE=binance
+      - TRADING_PAIRS=XRP/USDT
+      - CLIENT_ID=test-client
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=my-super-secret-token
+      - INFLUX_ORG=myorg
+      - INFLUX_BUCKET=trading
+      - LOG_LEVEL=debug
+      - API_KEY=SyYcY3nHijABuq9qQIeFQIYktcz53fmmrYVycKImN3qcfYo2xDH5uTUZ3kzSwmzD
+      - API_SECRET=5kqI8Rsmm8a3OhDHjAZq5sWzgmXN2D4YMi9T5S9npLFpfmZl37zraA9BGNUtlEdF
+
+volumes:
+  influxdb-data:
