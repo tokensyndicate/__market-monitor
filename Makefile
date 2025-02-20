@@ -29,6 +29,13 @@ clean:
 	rm -rf bin/
 	rm -rf tmp/
 
+.PHONY: vendor
+vendor:
+	./update-vendor.sh
+
+.PHONY: dev-setup
+dev-setup: vendor dev
+
 # Start local development environment
 .PHONY: dev
 dev:

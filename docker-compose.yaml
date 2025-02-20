@@ -3,6 +3,7 @@ version: "3.8"
 services:
   influxdb:
     image: influxdb:2.7
+    platform: linux/arm64
     ports:
       - "8086:8086"
     environment:
@@ -24,11 +25,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
-    depends_on:
-      influxdb:
-        condition: service_healthy
+    platform: linux/arm64
     volumes:
       - .:/app
+      - /app/vendor/ # Исключаем vendor из монтирования
     environment:
       - EXCHANGE=binance
       - TRADING_PAIRS=XRP/USDT
@@ -40,6 +40,13 @@ services:
       - LOG_LEVEL=debug
       - API_KEY=SyYcY3nHijABuq9qQIeFQIYktcz53fmmrYVycKImN3qcfYo2xDH5uTUZ3kzSwmzD
       - API_SECRET=5kqI8Rsmm8a3OhDHjAZq5sWzgmXN2D4YMi9T5S9npLFpfmZl37zraA9BGNUtlEdF
+    deploy:
+      resources:
+        limits:
+          memory: 16g
+          cpus: "8"
+    mem_limit: 16g
+    memswap_limit: 16g
 
 volumes:
   influxdb-data:

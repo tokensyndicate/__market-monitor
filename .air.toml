@@ -2,7 +2,8 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-cmd = "CGO_ENABLED=1 GOOS=linux GOGC=20 go build -o ./tmp/main ."
+# Используем vendor и включаем CGO
+cmd = "CGO_ENABLED=1 go build -mod=vendor -o ./tmp/main ."
 bin = "./tmp/main"
 delay = 1000
 exclude_dir = ["tmp", "vendor"]
