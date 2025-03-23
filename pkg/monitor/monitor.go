@@ -3,12 +3,13 @@ package monitor
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
 	"monitor/pkg/exchange"
 	"monitor/pkg/influx"
+
+	"github.com/rs/zerolog/log"
 )
 
 type Monitor struct {
@@ -19,6 +20,7 @@ type Monitor struct {
 	pairs        []string
 	lastTrades   map[string]time.Time
 	mu           sync.RWMutex
+	intervals    []string
 }
 
 func New(
@@ -27,6 +29,7 @@ func New(
 	exchangeName string,
 	clientID string,
 	pairs []string,
+	intervals []string,
 ) *Monitor {
 	return &Monitor{
 		exchange:     exchangeClient,
@@ -34,6 +37,7 @@ func New(
 		exchangeName: exchangeName,
 		clientID:     clientID,
 		pairs:        pairs,
+		intervals:    intervals,
 		lastTrades:   make(map[string]time.Time),
 	}
 }
@@ -41,21 +45,17 @@ func New(
 func (m *Monitor) Start(ctx context.Context) error {
 	var wg sync.WaitGroup
 
-	// Calculate number of routines
-	// Order book monitoring for all pairs
-	routines := len(m.pairs)
-
-	// Trade monitoring only if we have API credentials
-	hasCredentials := m.exchange.HasCredentials()
-	if hasCredentials {
-		routines *= 2
+	// Increase the number of routines by the number of pairs and intervals
+	routines := len(m.pairs) * (1 + len(m.intervals))
+	if m.exchange.HasCredentials() {
+		routines += len(m.pairs)
 	}
 
 	errCh := make(chan error, routines)
 
 	for _, pair := range m.pairs {
+		// Start monitoring order book
 		wg.Add(1)
-		// Order book monitoring always runs
 		go func(pair string) {
 			defer wg.Done()
 			if err := m.monitorOrderBook(ctx, pair); err != nil {
@@ -63,8 +63,19 @@ func (m *Monitor) Start(ctx context.Context) error {
 			}
 		}(pair)
 
-		// Trade monitoring only if we have credentials
-		if hasCredentials {
+		// Start monitoring candles
+		for _, interval := range m.intervals {
+			wg.Add(1)
+			go func(pair, interval string) {
+				defer wg.Done()
+				if err := m.monitorCandles(ctx, pair, interval); err != nil {
+					errCh <- fmt.Errorf("candles monitor failed for %s (%s): %w", pair, interval, err)
+				}
+			}(pair, interval)
+		}
+
+		// If exchange has credentials, start monitoring trades
+		if m.exchange.HasCredentials() {
 			wg.Add(1)
 			go func(pair string) {
 				defer wg.Done()
@@ -83,6 +94,157 @@ func (m *Monitor) Start(ctx context.Context) error {
 	for err := range errCh {
 		return err
 	}
+
+	return nil
+}
+
+func parseInterval(interval string) (time.Duration, error) {
+	switch interval {
+	case "1m":
+		return time.Minute, nil
+	case "5m":
+		return 5 * time.Minute, nil
+	case "15m":
+		return 15 * time.Minute, nil
+	case "1h":
+		return time.Hour, nil
+	case "4h":
+		return 4 * time.Hour, nil
+	case "1d":
+		return 24 * time.Hour, nil
+	default:
+		return 0, fmt.Errorf("unsupported interval: %s", interval)
+	}
+}
+
+func (m *Monitor) monitorCandles(ctx context.Context, pair string, interval string) error {
+	duration, err := parseInterval(interval)
+	if err != nil {
+		log.Error().
+			Str("pair", pair).
+			Str("interval", interval).
+			Err(err).
+			Msg("Failed to parse interval")
+		return fmt.Errorf("invalid interval %s: %w", interval, err)
+	}
+
+	log.Info().
+		Str("pair", pair).
+		Str("interval", interval).
+		Dur("duration", duration).
+		Msg("Starting candles monitor")
+
+	// Начальная точка - 24 часа назад
+	since := time.Now().Add(-24 * time.Hour)
+
+	log.Info().
+		Str("pair", pair).
+		Str("interval", interval).
+		Time("since", since).
+		Msg("Initial fetch point set")
+
+	// Выполняем первый запрос немедленно
+	if err := m.fetchAndSaveCandles(ctx, pair, interval, since); err != nil {
+		log.Error().
+			Str("pair", pair).
+			Str("interval", interval).
+			Err(err).
+			Msg("Initial candles fetch failed")
+	}
+
+	// Устанавливаем тикер на начало следующего периода
+	now := time.Now()
+	nextTick := now.Truncate(duration).Add(duration)
+	initialDelay := nextTick.Sub(now)
+
+	timer := time.NewTimer(initialDelay)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().
+				Str("pair", pair).
+				Str("interval", interval).
+				Msg("Stopping candles monitor")
+			return nil
+		case <-timer.C:
+			if err := m.fetchAndSaveCandles(ctx, pair, interval, since); err != nil {
+				log.Error().
+					Str("pair", pair).
+					Str("interval", interval).
+					Err(err).
+					Msg("Failed to fetch and save candles")
+			}
+			// Устанавливаем следующий тик через duration
+			timer.Reset(duration)
+		}
+	}
+}
+
+func (m *Monitor) fetchAndSaveCandles(ctx context.Context, pair string, interval string, since time.Time) error {
+	log.Debug().
+		Str("pair", pair).
+		Str("interval", interval).
+		Time("since", since).
+		Msg("Fetching candles")
+
+	candles, err := m.exchange.FetchCandles(ctx, pair, interval, since)
+	if err != nil {
+		return fmt.Errorf("failed to fetch candles: %w", err)
+	}
+
+	if len(candles) == 0 {
+		log.Debug().
+			Str("pair", pair).
+			Str("interval", interval).
+			Msg("No new candles received")
+		return nil
+	}
+
+	log.Debug().
+		Str("pair", pair).
+		Str("interval", interval).
+		Int("candles_count", len(candles)).
+		Msg("Processing fetched candles")
+
+	var lastTimestamp time.Time
+	for _, candle := range candles {
+		data := influx.Candle{
+			Timestamp:   candle.Timestamp,
+			Exchange:    m.exchangeName,
+			TradingPair: pair,
+			Interval:    interval,
+			ClientID:    m.clientID,
+			Open:        candle.Open,
+			High:        candle.High,
+			Low:         candle.Low,
+			Close:       candle.Close,
+			Volume:      candle.Volume,
+			TradesCount: candle.TradesCount,
+		}
+
+		if err := m.influx.WriteCandle(data); err != nil {
+			log.Error().
+				Str("pair", pair).
+				Str("interval", interval).
+				Time("timestamp", candle.Timestamp).
+				Err(err).
+				Msg("Failed to write candle data")
+			continue
+		}
+
+		if candle.Timestamp.After(lastTimestamp) {
+			lastTimestamp = candle.Timestamp
+		}
+	}
+
+	log.Info().
+		Str("pair", pair).
+		Str("interval", interval).
+		Int("processed_candles", len(candles)).
+		Time("last_timestamp", lastTimestamp).
+		Msg("Successfully processed and saved candles")
 
 	return nil
 }

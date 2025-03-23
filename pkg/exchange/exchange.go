@@ -3,16 +3,28 @@ package exchange
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
 	ccxt "github.com/ccxt/ccxt/go/v4"
+	"github.com/rs/zerolog/log"
 )
 
 type Client struct {
 	exchange   ccxt.IExchange
 	orderBooks map[string]*OrderBookCache
 	mu         sync.RWMutex
+}
+
+type Candle struct {
+	Timestamp   time.Time
+	Open        float64
+	High        float64
+	Low         float64
+	Close       float64
+	Volume      float64
+	TradesCount int64
 }
 
 type OrderBookCache struct {
@@ -63,6 +75,145 @@ func (c *Client) HasCredentials() bool {
 		return exchangeImpl.ApiKey != "" && exchangeImpl.Secret != ""
 	}
 	return false
+}
+
+func (c *Client) FetchCandles(ctx context.Context, symbol string, interval string, since time.Time) ([]Candle, error) {
+	log.Info().
+		Str("symbol", symbol).
+		Str("interval", interval).
+		Time("since", since).
+		Msg("Fetching candles from exchange")
+
+	// Fetch candles
+	ch := c.exchange.FetchOHLCV(symbol, interval, nil, 1000)
+	result := <-ch
+
+	if ccxt.IsError(result) {
+		log.Error().
+			Str("symbol", symbol).
+			Str("interval", interval).
+			Err(ccxt.CreateReturnError(result)).
+			Msg("Failed to fetch candles from exchange")
+		return nil, fmt.Errorf("failed to fetch candles: %v", ccxt.CreateReturnError(result))
+	}
+
+	ohlcvData, ok := result.([]interface{})
+	if !ok {
+		log.Error().
+			Str("symbol", symbol).
+			Str("interval", interval).
+			Interface("result", result).
+			Msg("Invalid OHLCV response type")
+		return nil, fmt.Errorf("invalid OHLCV response type")
+	}
+
+	log.Debug().
+		Str("symbol", symbol).
+		Str("interval", interval).
+		Int("candles_count", len(ohlcvData)).
+		Msg("Received candles from exchange")
+
+	candles := make([]Candle, 0, len(ohlcvData))
+	for i, data := range ohlcvData {
+		candleData, ok := data.([]interface{})
+		if !ok || len(candleData) < 6 {
+			log.Warn().
+				Str("symbol", symbol).
+				Str("interval", interval).
+				Int("index", i).
+				Interface("data", data).
+				Msg("Invalid candle data format")
+			continue
+		}
+
+		// Проверяем timestamp и конвертируем его правильно
+		var timestamp int64
+		switch ts := candleData[0].(type) {
+		case float64:
+			timestamp = int64(ts)
+		case int64:
+			timestamp = ts
+		case int:
+			timestamp = int64(ts)
+		default:
+			log.Warn().
+				Str("symbol", symbol).
+				Str("interval", interval).
+				Int("index", i).
+				Interface("timestamp", candleData[0]).
+				Msg("Invalid timestamp type")
+			continue
+		}
+
+		// Проверяем, что timestamp находится в прошлом
+		candleTime := time.UnixMilli(timestamp)
+		if candleTime.After(time.Now()) {
+			log.Warn().
+				Str("symbol", symbol).
+				Str("interval", interval).
+				Int("index", i).
+				Time("candle_time", candleTime).
+				Msg("Skipping future candle")
+			continue
+		}
+
+		open, _ := toFloat64(candleData[1])
+		high, _ := toFloat64(candleData[2])
+		low, _ := toFloat64(candleData[3])
+		close, _ := toFloat64(candleData[4])
+		volume, _ := toFloat64(candleData[5])
+
+		var tradesCount int64
+		if len(candleData) > 6 {
+			if count, ok := toFloat64(candleData[6]); ok {
+				tradesCount = int64(count)
+			}
+		}
+
+		candles = append(candles, Candle{
+			Timestamp:   candleTime,
+			Open:        open,
+			High:        high,
+			Low:         low,
+			Close:       close,
+			Volume:      volume,
+			TradesCount: tradesCount,
+		})
+	}
+
+	if len(candles) == 0 {
+		log.Warn().
+			Str("symbol", symbol).
+			Str("interval", interval).
+			Msg("No valid candles received")
+		return []Candle{}, nil
+	}
+
+	log.Info().
+		Str("symbol", symbol).
+		Str("interval", interval).
+		Int("processed_candles", len(candles)).
+		Time("first_candle", candles[0].Timestamp).
+		Time("last_candle", candles[len(candles)-1].Timestamp).
+		Msg("Successfully processed candles")
+
+	return candles, nil
+}
+
+func toFloat64(v interface{}) (float64, bool) {
+	switch i := v.(type) {
+	case float64:
+		return i, true
+	case int64:
+		return float64(i), true
+	case int:
+		return float64(i), true
+	case string:
+		if f, err := strconv.ParseFloat(i, 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
 }
 
 func (c *Client) FetchOrderBook(ctx context.Context, symbol string) (*OrderBook, error) {
