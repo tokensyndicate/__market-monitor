@@ -27,10 +27,16 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to load configuration")
 	}
 
+	// Convert []types.Interval to []string for logging
+	intervals := make([]string, len(cfg.Intervals))
+	for i, interval := range cfg.Intervals {
+		intervals[i] = string(interval)
+	}
+
 	log.Info().
 		Str("exchange", cfg.Exchange).
 		Strs("pairs", cfg.TradingPairs).
-		Strs("intervals", cfg.Intervals).
+		Strs("intervals", intervals).
 		Str("influxDB", cfg.InfluxURL).
 		Msg("Loaded configuration")
 
@@ -45,7 +51,7 @@ func main() {
 		cfg.InfluxURL,
 		cfg.InfluxToken,
 		cfg.InfluxOrg,
-		cfg.InfluxBucket,
+		cfg.InfluxBuckets,
 	)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create InfluxDB client")
@@ -55,7 +61,9 @@ func main() {
 	log.Info().
 		Str("url", cfg.InfluxURL).
 		Str("org", cfg.InfluxOrg).
-		Str("bucket", cfg.InfluxBucket).
+		Str("bucket_candles", cfg.InfluxBuckets.Candles).
+		Str("bucket_orderbook", cfg.InfluxBuckets.OrderBook).
+		Str("bucket_orderbook_agg", cfg.InfluxBuckets.OrderBookAgg).
 		Msg("InfluxDB client initialized")
 
 	// Create monitor
@@ -88,7 +96,7 @@ func main() {
 	log.Info().
 		Str("exchange", cfg.Exchange).
 		Strs("pairs", cfg.TradingPairs).
-		Strs("intervals", cfg.Intervals).
+		Strs("intervals", intervals).
 		Bool("has_credentials", exchangeClient.HasCredentials()).
 		Msg("Starting market monitoring")
 

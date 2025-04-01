@@ -6,8 +6,10 @@ import (
 	"sync"
 	"time"
 
+	"monitor/pkg/aggregator"
 	"monitor/pkg/exchange"
 	"monitor/pkg/influx"
+	"monitor/pkg/types"
 
 	"github.com/rs/zerolog/log"
 )
@@ -20,7 +22,8 @@ type Monitor struct {
 	pairs        []string
 	lastTrades   map[string]time.Time
 	mu           sync.RWMutex
-	intervals    []string
+	intervals    []types.Interval
+	aggregators  map[string]map[types.Interval]*aggregator.OrderBookAggregator
 }
 
 func New(
@@ -29,9 +32,9 @@ func New(
 	exchangeName string,
 	clientID string,
 	pairs []string,
-	intervals []string,
+	intervals []types.Interval,
 ) *Monitor {
-	return &Monitor{
+	m := &Monitor{
 		exchange:     exchangeClient,
 		influx:       influxClient,
 		exchangeName: exchangeName,
@@ -39,7 +42,26 @@ func New(
 		pairs:        pairs,
 		intervals:    intervals,
 		lastTrades:   make(map[string]time.Time),
+		aggregators:  make(map[string]map[types.Interval]*aggregator.OrderBookAggregator),
 	}
+
+	// Initialize aggregators for each pair
+	for _, pair := range pairs {
+		m.aggregators[pair] = make(map[types.Interval]*aggregator.OrderBookAggregator)
+
+		// Use the same intervals as for candles
+		for _, interval := range intervals {
+			m.aggregators[pair][interval] = aggregator.NewOrderBookAggregator(
+				interval,
+				0.02, // 2% depth range
+				func(agg aggregator.OrderBookAggregation) error {
+					return m.influx.WriteOrderBookAggregation(agg)
+				},
+			)
+		}
+	}
+
+	return m
 }
 
 func (m *Monitor) Start(ctx context.Context) error {
@@ -66,7 +88,7 @@ func (m *Monitor) Start(ctx context.Context) error {
 		// Start monitoring candles
 		for _, interval := range m.intervals {
 			wg.Add(1)
-			go func(pair, interval string) {
+			go func(pair string, interval types.Interval) {
 				defer wg.Done()
 				if err := m.monitorCandles(ctx, pair, interval); err != nil {
 					errCh <- fmt.Errorf("candles monitor failed for %s (%s): %w", pair, interval, err)
@@ -117,12 +139,12 @@ func parseInterval(interval string) (time.Duration, error) {
 	}
 }
 
-func (m *Monitor) monitorCandles(ctx context.Context, pair string, interval string) error {
-	duration, err := parseInterval(interval)
+func (m *Monitor) monitorCandles(ctx context.Context, pair string, interval types.Interval) error {
+	duration, err := interval.Duration()
 	if err != nil {
 		log.Error().
 			Str("pair", pair).
-			Str("interval", interval).
+			Str("interval", string(interval)).
 			Err(err).
 			Msg("Failed to parse interval")
 		return fmt.Errorf("invalid interval %s: %w", interval, err)
@@ -130,7 +152,7 @@ func (m *Monitor) monitorCandles(ctx context.Context, pair string, interval stri
 
 	log.Info().
 		Str("pair", pair).
-		Str("interval", interval).
+		Str("interval", string(interval)).
 		Dur("duration", duration).
 		Msg("Starting candles monitor")
 
@@ -139,7 +161,7 @@ func (m *Monitor) monitorCandles(ctx context.Context, pair string, interval stri
 
 	log.Info().
 		Str("pair", pair).
-		Str("interval", interval).
+		Str("interval", interval.String()).
 		Time("since", since).
 		Msg("Initial fetch point set")
 
@@ -147,7 +169,7 @@ func (m *Monitor) monitorCandles(ctx context.Context, pair string, interval stri
 	if err := m.fetchAndSaveCandles(ctx, pair, interval, since); err != nil {
 		log.Error().
 			Str("pair", pair).
-			Str("interval", interval).
+			Str("interval", interval.String()).
 			Err(err).
 			Msg("Initial candles fetch failed")
 	}
@@ -165,14 +187,14 @@ func (m *Monitor) monitorCandles(ctx context.Context, pair string, interval stri
 		case <-ctx.Done():
 			log.Info().
 				Str("pair", pair).
-				Str("interval", interval).
+				Str("interval", string(interval)).
 				Msg("Stopping candles monitor")
 			return nil
 		case <-timer.C:
 			if err := m.fetchAndSaveCandles(ctx, pair, interval, since); err != nil {
 				log.Error().
 					Str("pair", pair).
-					Str("interval", interval).
+					Str("interval", interval.String()).
 					Err(err).
 					Msg("Failed to fetch and save candles")
 			}
@@ -182,10 +204,10 @@ func (m *Monitor) monitorCandles(ctx context.Context, pair string, interval stri
 	}
 }
 
-func (m *Monitor) fetchAndSaveCandles(ctx context.Context, pair string, interval string, since time.Time) error {
+func (m *Monitor) fetchAndSaveCandles(ctx context.Context, pair string, interval types.Interval, since time.Time) error {
 	log.Debug().
 		Str("pair", pair).
-		Str("interval", interval).
+		Str("interval", string(interval)).
 		Time("since", since).
 		Msg("Fetching candles")
 
@@ -197,14 +219,14 @@ func (m *Monitor) fetchAndSaveCandles(ctx context.Context, pair string, interval
 	if len(candles) == 0 {
 		log.Debug().
 			Str("pair", pair).
-			Str("interval", interval).
+			Str("interval", interval.String()).
 			Msg("No new candles received")
 		return nil
 	}
 
 	log.Debug().
 		Str("pair", pair).
-		Str("interval", interval).
+		Str("interval", interval.String()).
 		Int("candles_count", len(candles)).
 		Msg("Processing fetched candles")
 
@@ -227,7 +249,7 @@ func (m *Monitor) fetchAndSaveCandles(ctx context.Context, pair string, interval
 		if err := m.influx.WriteCandle(data); err != nil {
 			log.Error().
 				Str("pair", pair).
-				Str("interval", interval).
+				Str("interval", interval.String()).
 				Time("timestamp", candle.Timestamp).
 				Err(err).
 				Msg("Failed to write candle data")
@@ -241,7 +263,7 @@ func (m *Monitor) fetchAndSaveCandles(ctx context.Context, pair string, interval
 
 	log.Info().
 		Str("pair", pair).
-		Str("interval", interval).
+		Str("interval", interval.String()).
 		Int("processed_candles", len(candles)).
 		Time("last_timestamp", lastTimestamp).
 		Msg("Successfully processed and saved candles")
@@ -260,21 +282,37 @@ func (m *Monitor) monitorOrderBook(ctx context.Context, pair string) error {
 		case <-ticker.C:
 			book, err := m.exchange.FetchOrderBook(ctx, pair)
 			if err != nil {
-				log.Printf("Failed to fetch order book for %s: %v", pair, err)
+				log.Error().
+					Str("pair", pair).
+					Err(err).
+					Msg("Failed to fetch order book")
 				continue
 			}
 
-			timestamp := time.Now()
+			// Create snapshot
+			snapshot := &aggregator.OrderBookSnapshot{
+				Timestamp:   time.Now(),
+				Exchange:    m.exchangeName,
+				TradingPair: pair,
+				Bids:        book.Bids,
+				Asks:        book.Asks,
+			}
 
-			// Process bids
-			for i, bid := range book.Bids {
-				totalVolume := 0.0
-				for j := 0; j <= i; j++ {
-					totalVolume += book.Bids[j][1]
+			// Send to all aggregators
+			for interval, agg := range m.aggregators[pair] {
+				if err := agg.AddSnapshot(snapshot); err != nil {
+					log.Error().
+						Str("pair", pair).
+						Str("interval", string(interval)).
+						Err(err).
+						Msg("Failed to add snapshot to aggregator")
 				}
+			}
 
+			// Write real-time order book data
+			for i, bid := range book.Bids {
 				entry := influx.OrderBookEntry{
-					Timestamp:   timestamp,
+					Timestamp:   book.Timestamp,
 					Exchange:    m.exchangeName,
 					TradingPair: pair,
 					ClientID:    m.clientID,
@@ -282,23 +320,18 @@ func (m *Monitor) monitorOrderBook(ctx context.Context, pair string) error {
 					Side:        "bid",
 					Price:       bid[0],
 					Volume:      bid[1],
-					TotalVolume: totalVolume,
 				}
-
 				if err := m.influx.WriteOrderBookEntry(entry); err != nil {
-					log.Printf("Failed to write bid entry: %v", err)
+					log.Error().
+						Str("pair", pair).
+						Err(err).
+						Msg("Failed to write bid entry")
 				}
 			}
 
-			// Process asks
 			for i, ask := range book.Asks {
-				totalVolume := 0.0
-				for j := 0; j <= i; j++ {
-					totalVolume += book.Asks[j][1]
-				}
-
 				entry := influx.OrderBookEntry{
-					Timestamp:   timestamp,
+					Timestamp:   book.Timestamp,
 					Exchange:    m.exchangeName,
 					TradingPair: pair,
 					ClientID:    m.clientID,
@@ -306,11 +339,12 @@ func (m *Monitor) monitorOrderBook(ctx context.Context, pair string) error {
 					Side:        "ask",
 					Price:       ask[0],
 					Volume:      ask[1],
-					TotalVolume: totalVolume,
 				}
-
 				if err := m.influx.WriteOrderBookEntry(entry); err != nil {
-					log.Printf("Failed to write ask entry: %v", err)
+					log.Error().
+						Str("pair", pair).
+						Err(err).
+						Msg("Failed to write ask entry")
 				}
 			}
 		}

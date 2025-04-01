@@ -2,6 +2,8 @@ package influx
 
 import (
 	"context"
+	"monitor/pkg/aggregator"
+	"monitor/pkg/types"
 	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
@@ -9,10 +11,13 @@ import (
 )
 
 type Client struct {
-	client   influxdb2.Client
-	writeAPI api.WriteAPIBlocking
-	org      string
-	bucket   string
+	client    influxdb2.Client
+	writeAPIs struct {
+		candles      api.WriteAPIBlocking
+		orderBook    api.WriteAPIBlocking
+		orderBookAgg api.WriteAPIBlocking
+	}
+	org string
 }
 
 // OrderBookEntry represents a single entry in the order book
@@ -50,7 +55,7 @@ type Candle struct {
 	Timestamp   time.Time
 	Exchange    string
 	TradingPair string
-	Interval    string
+	Interval    types.Interval
 	ClientID    string
 	Open        float64
 	High        float64
@@ -60,7 +65,11 @@ type Candle struct {
 	TradesCount int64
 }
 
-func NewClient(url, token, org, bucket string) (*Client, error) {
+func NewClient(url, token, org string, buckets struct {
+	Candles      string
+	OrderBook    string
+	OrderBookAgg string
+}) (*Client, error) {
 	client := influxdb2.NewClient(url, token)
 
 	// Check connection
@@ -69,12 +78,17 @@ func NewClient(url, token, org, bucket string) (*Client, error) {
 		return nil, err
 	}
 
-	return &Client{
-		client:   client,
-		writeAPI: client.WriteAPIBlocking(org, bucket),
-		org:      org,
-		bucket:   bucket,
-	}, nil
+	c := &Client{
+		client: client,
+		org:    org,
+	}
+
+	// Initialize separate write APIs for each bucket
+	c.writeAPIs.candles = client.WriteAPIBlocking(org, buckets.Candles)
+	c.writeAPIs.orderBook = client.WriteAPIBlocking(org, buckets.OrderBook)
+	c.writeAPIs.orderBookAgg = client.WriteAPIBlocking(org, buckets.OrderBookAgg)
+
+	return c, nil
 }
 
 func (c *Client) Close() {
@@ -93,14 +107,14 @@ func (c *Client) WriteOrderBookEntry(entry OrderBookEntry) error {
 	}
 
 	// Fields (non-indexed)
-	p.AddField("level", entry.Level)
-	p.AddField("price", entry.Price)
-	p.AddField("volume", entry.Volume)
+	p.AddField("level", float64(entry.Level))
+	p.AddField("price", float64(entry.Price))
+	p.AddField("volume", float64(entry.Volume))
 	p.AddField("total_volume", entry.TotalVolume)
 
 	p.SetTime(entry.Timestamp)
 
-	return c.writeAPI.WritePoint(context.Background(), p)
+	return c.writeAPIs.orderBook.WritePoint(context.Background(), p)
 }
 
 func (c *Client) WriteTrade(trade Trade) error {
@@ -116,15 +130,15 @@ func (c *Client) WriteTrade(trade Trade) error {
 	// Fields (non-indexed)
 	p.AddField("trade_id", trade.TradeID)
 	p.AddField("order_id", trade.OrderID)
-	p.AddField("price", trade.Price)
-	p.AddField("volume", trade.Volume)
-	p.AddField("value", trade.Value)
-	p.AddField("fee_amount", trade.FeeAmount)
+	p.AddField("price", float64(trade.Price))
+	p.AddField("volume", float64(trade.Volume))
+	p.AddField("value", float64(trade.Value))
+	p.AddField("fee_amount", float64(trade.FeeAmount))
 	p.AddField("fee_currency", trade.FeeCurrency)
 
 	p.SetTime(trade.Timestamp)
 
-	return c.writeAPI.WritePoint(context.Background(), p)
+	return c.writeAPIs.orderBook.WritePoint(context.Background(), p)
 }
 
 func (c *Client) WriteCandle(candle Candle) error {
@@ -133,20 +147,52 @@ func (c *Client) WriteCandle(candle Candle) error {
 	// Tags
 	p.AddTag("exchange", candle.Exchange)
 	p.AddTag("trading_pair", candle.TradingPair)
-	p.AddTag("interval", candle.Interval)
+	p.AddTag("interval", candle.Interval.String())
 	if candle.ClientID != "" {
 		p.AddTag("client_id", candle.ClientID)
 	}
 
 	// Fields
-	p.AddField("open", candle.Open)
-	p.AddField("high", candle.High)
-	p.AddField("low", candle.Low)
-	p.AddField("close", candle.Close)
-	p.AddField("volume", candle.Volume)
+	p.AddField("open", float64(candle.Open))
+	p.AddField("high", float64(candle.High))
+	p.AddField("low", float64(candle.Low))
+	p.AddField("close", float64(candle.Close))
+	p.AddField("volume", float64(candle.Volume))
 	p.AddField("trades_count", candle.TradesCount)
 
 	p.SetTime(candle.Timestamp)
 
-	return c.writeAPI.WritePoint(context.Background(), p)
+	return c.writeAPIs.candles.WritePoint(context.Background(), p)
+}
+
+func (c *Client) WriteOrderBookAggregation(agg aggregator.OrderBookAggregation) error {
+	p := influxdb2.NewPointWithMeasurement("orderbook_aggregations")
+
+	// Tags (indexed fields)
+	p.AddTag("exchange", agg.Exchange)
+	p.AddTag("trading_pair", agg.TradingPair)
+	p.AddTag("interval", string(agg.Interval))
+
+	// Price metrics
+	p.AddField("mid_price", agg.MidPrice)
+	p.AddField("average_spread", agg.AverageSpread)
+	p.AddField("min_spread", agg.MinSpread)
+	p.AddField("max_spread", agg.MaxSpread)
+	p.AddField("spread_volatility", agg.SpreadVolatility)
+
+	// Depth metrics
+	p.AddField("bid_depth", agg.BidDepth)
+	p.AddField("ask_depth", agg.AskDepth)
+	p.AddField("depth_imbalance", agg.DepthImbalance)
+
+	// Pressure metrics
+	p.AddField("buy_pressure", agg.BuyPressure)
+	p.AddField("sell_pressure", agg.SellPressure)
+
+	// Count metrics
+	p.AddField("snapshot_count", agg.SnapshotCount)
+
+	p.SetTime(agg.Timestamp)
+
+	return c.writeAPIs.orderBookAgg.WritePoint(context.Background(), p)
 }

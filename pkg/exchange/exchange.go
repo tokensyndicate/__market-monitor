@@ -3,6 +3,7 @@ package exchange
 import (
 	"context"
 	"fmt"
+	"monitor/pkg/types"
 	"strconv"
 	"sync"
 	"time"
@@ -77,10 +78,10 @@ func (c *Client) HasCredentials() bool {
 	return false
 }
 
-func (c *Client) FetchCandles(ctx context.Context, symbol string, interval string, since time.Time) ([]Candle, error) {
+func (c *Client) FetchCandles(ctx context.Context, symbol string, interval types.Interval, since time.Time) ([]Candle, error) {
 	log.Info().
 		Str("symbol", symbol).
-		Str("interval", interval).
+		Str("interval", string(interval)).
 		Time("since", since).
 		Msg("Fetching candles from exchange")
 
@@ -91,7 +92,7 @@ func (c *Client) FetchCandles(ctx context.Context, symbol string, interval strin
 	if ccxt.IsError(result) {
 		log.Error().
 			Str("symbol", symbol).
-			Str("interval", interval).
+			Str("interval", interval.String()).
 			Err(ccxt.CreateReturnError(result)).
 			Msg("Failed to fetch candles from exchange")
 		return nil, fmt.Errorf("failed to fetch candles: %v", ccxt.CreateReturnError(result))
@@ -101,7 +102,7 @@ func (c *Client) FetchCandles(ctx context.Context, symbol string, interval strin
 	if !ok {
 		log.Error().
 			Str("symbol", symbol).
-			Str("interval", interval).
+			Str("interval", interval.String()).
 			Interface("result", result).
 			Msg("Invalid OHLCV response type")
 		return nil, fmt.Errorf("invalid OHLCV response type")
@@ -109,7 +110,7 @@ func (c *Client) FetchCandles(ctx context.Context, symbol string, interval strin
 
 	log.Debug().
 		Str("symbol", symbol).
-		Str("interval", interval).
+		Str("interval", interval.String()).
 		Int("candles_count", len(ohlcvData)).
 		Msg("Received candles from exchange")
 
@@ -119,7 +120,7 @@ func (c *Client) FetchCandles(ctx context.Context, symbol string, interval strin
 		if !ok || len(candleData) < 6 {
 			log.Warn().
 				Str("symbol", symbol).
-				Str("interval", interval).
+				Str("interval", interval.String()).
 				Int("index", i).
 				Interface("data", data).
 				Msg("Invalid candle data format")
@@ -138,7 +139,7 @@ func (c *Client) FetchCandles(ctx context.Context, symbol string, interval strin
 		default:
 			log.Warn().
 				Str("symbol", symbol).
-				Str("interval", interval).
+				Str("interval", interval.String()).
 				Int("index", i).
 				Interface("timestamp", candleData[0]).
 				Msg("Invalid timestamp type")
@@ -150,7 +151,7 @@ func (c *Client) FetchCandles(ctx context.Context, symbol string, interval strin
 		if candleTime.After(time.Now()) {
 			log.Warn().
 				Str("symbol", symbol).
-				Str("interval", interval).
+				Str("interval", interval.String()).
 				Int("index", i).
 				Time("candle_time", candleTime).
 				Msg("Skipping future candle")
@@ -184,14 +185,14 @@ func (c *Client) FetchCandles(ctx context.Context, symbol string, interval strin
 	if len(candles) == 0 {
 		log.Warn().
 			Str("symbol", symbol).
-			Str("interval", interval).
+			Str("interval", interval.String()).
 			Msg("No valid candles received")
 		return []Candle{}, nil
 	}
 
 	log.Info().
 		Str("symbol", symbol).
-		Str("interval", interval).
+		Str("interval", interval.String()).
 		Int("processed_candles", len(candles)).
 		Time("first_candle", candles[0].Timestamp).
 		Time("last_candle", candles[len(candles)-1].Timestamp).
