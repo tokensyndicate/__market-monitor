@@ -309,9 +309,12 @@ func (m *Monitor) monitorOrderBook(ctx context.Context, pair string) error {
 				}
 			}
 
-			// Write real-time order book data
+			// Предварительно выделяем память для слайса
+			entries := make([]influx.OrderBookEntry, 0, len(book.Bids)+len(book.Asks))
+
+			// Записываем биды
 			for i, bid := range book.Bids {
-				entry := influx.OrderBookEntry{
+				entries = append(entries, influx.OrderBookEntry{
 					Timestamp:   book.Timestamp,
 					Exchange:    m.exchangeName,
 					TradingPair: pair,
@@ -320,17 +323,12 @@ func (m *Monitor) monitorOrderBook(ctx context.Context, pair string) error {
 					Side:        "bid",
 					Price:       bid[0],
 					Volume:      bid[1],
-				}
-				if err := m.influx.WriteOrderBookEntry(entry); err != nil {
-					log.Error().
-						Str("pair", pair).
-						Err(err).
-						Msg("Failed to write bid entry")
-				}
+				})
 			}
 
+			// Записываем аски
 			for i, ask := range book.Asks {
-				entry := influx.OrderBookEntry{
+				entries = append(entries, influx.OrderBookEntry{
 					Timestamp:   book.Timestamp,
 					Exchange:    m.exchangeName,
 					TradingPair: pair,
@@ -339,13 +337,15 @@ func (m *Monitor) monitorOrderBook(ctx context.Context, pair string) error {
 					Side:        "ask",
 					Price:       ask[0],
 					Volume:      ask[1],
-				}
-				if err := m.influx.WriteOrderBookEntry(entry); err != nil {
-					log.Error().
-						Str("pair", pair).
-						Err(err).
-						Msg("Failed to write ask entry")
-				}
+				})
+			}
+
+			if err := m.influx.WriteBatchOrderBookEntries(ctx, entries); err != nil {
+				log.Error().
+					Str("pair", pair).
+					Int("entries", len(entries)).
+					Err(err).
+					Msg("Failed to write batch order book entries")
 			}
 		}
 	}

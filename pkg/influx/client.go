@@ -2,12 +2,15 @@ package influx
 
 import (
 	"context"
+	"fmt"
 	"monitor/pkg/aggregator"
 	"monitor/pkg/types"
 	"time"
+	"strconv"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
+	"github.com/influxdata/influxdb-client-go/v2/api/write"
 )
 
 type Client struct {
@@ -91,30 +94,45 @@ func NewClient(url, token, org string, buckets struct {
 	return c, nil
 }
 
+func (c *Client) QueryAPI() api.QueryAPI {
+	return c.client.QueryAPI(c.org)
+}
+
 func (c *Client) Close() {
 	c.client.Close()
 }
 
-func (c *Client) WriteOrderBookEntry(entry OrderBookEntry) error {
-	p := influxdb2.NewPointWithMeasurement("orderbook")
+func (c *Client) WriteBatchOrderBookEntries(ctx context.Context, entries []OrderBookEntry) error {
+    // Создаем массив точек InfluxDB
+    points := make([]*write.Point, 0, len(entries))
+    for _, entry := range entries {
+        // Создаем точку для каждой записи
+        p := write.NewPoint(
+            "orderbook",
+            map[string]string{
+                "exchange":     entry.Exchange,
+                "trading_pair": entry.TradingPair,
+                "client_id":    entry.ClientID,
+                "side":         entry.Side,
+                "level":        strconv.FormatInt(int64(entry.Level), 10), // level как тег
+            },
+            map[string]interface{}{
+                "price":        entry.Price,
+                "volume":       entry.Volume,
+                "total_volume": entry.TotalVolume,
+            },
+            entry.Timestamp,
+        )
+        points = append(points, p)
+    }
 
-	// Tags (indexed fields)
-	p.AddTag("exchange", entry.Exchange)
-	p.AddTag("trading_pair", entry.TradingPair)
-	p.AddTag("side", entry.Side)
-	if entry.ClientID != "" {
-		p.AddTag("client_id", entry.ClientID)
-	}
-
-	// Fields (non-indexed)
-	p.AddField("level", float64(entry.Level))
-	p.AddField("price", float64(entry.Price))
-	p.AddField("volume", float64(entry.Volume))
-	p.AddField("total_volume", entry.TotalVolume)
-
-	p.SetTime(entry.Timestamp)
-
-	return c.writeAPIs.orderBook.WritePoint(context.Background(), p)
+    // Записываем все точки за одну операцию
+    if err := c.writeAPIs.orderBook.WritePoint(ctx, points...); err != nil {
+        return fmt.Errorf("failed to write points to InfluxDB: %w", err)
+    }
+    // Принудительная синхронизация данных с базой
+    c.writeAPIs.orderBook.Flush(ctx)
+    return nil
 }
 
 func (c *Client) WriteTrade(trade Trade) error {

@@ -255,6 +255,12 @@ func (c *Client) FetchOrderBook(ctx context.Context, symbol string) (*OrderBook,
 	}
 	c.mu.Unlock()
 
+	log.Debug().
+		Str("symbol", symbol).
+		Int("bids_count", len(bids)).
+		Int("asks_count", len(asks)).
+		Msg("Fetched order book from exchange")
+
 	return orderBook, nil
 }
 

@@ -6,6 +6,7 @@ toolchain go1.23.6
 
 require (
 	github.com/ccxt/ccxt/go/v4 v4.4.57
+	github.com/google/uuid v1.6.0
 	github.com/influxdata/influxdb-client-go/v2 v2.13.0
 	github.com/rs/zerolog v1.33.0
 )
@@ -21,7 +22,6 @@ require (
 	github.com/ethereum/c-kzg-4844 v1.0.0 // indirect
 	github.com/ethereum/go-ethereum v1.14.13 // indirect
 	github.com/ethereum/go-verkle v0.1.1-0.20240829091221-dffa7562dbe9 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/holiman/uint256 v1.3.1 // indirect
 	github.com/influxdata/line-protocol v0.0.0-20200327222509-2487e7298839 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
